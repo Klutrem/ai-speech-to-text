@@ -1,0 +1,17 @@
+FROM python:3.10-slim
+
+ARG PIP_REQ_FILE=requirements.txt
+
+RUN apt update && apt install git ffmpeg -y
+
+WORKDIR /app
+
+COPY ${PIP_REQ_FILE} ${PIP_REQ_FILE}
+COPY src/ src/
+
+
+RUN pip3 install -r ${PIP_REQ_FILE}
+
+EXPOSE 8000
+
+CMD [ "fastapi", "run", "src/main.py" ]
