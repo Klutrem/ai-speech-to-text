@@ -1,8 +1,12 @@
-from datasets import DatasetDict, load_from_disk, Audio
-from transformers import WhisperFeatureExtractor, WhisperTokenizer, WhisperForConditionalGeneration, Seq2SeqTrainingArguments, Seq2SeqTrainer
-import evaluate
-import numpy as np
+import os
 import time
+from datasets import DatasetDict, load_from_disk, Audio
+from transformers import (
+    WhisperFeatureExtractor, WhisperTokenizer, 
+    WhisperForConditionalGeneration, Seq2SeqTrainingArguments, 
+    Seq2SeqTrainer
+)
+import evaluate
 
 # Load feature extractor, tokenizer, and model
 feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-small")
@@ -60,13 +64,14 @@ wer = evaluate.load("wer")
 # Define training arguments for the quick test
 quick_test_args = Seq2SeqTrainingArguments(
     output_dir="./quick_test_results",
-    per_device_train_batch_size=2,  # Smaller batch size to reduce memory load
+    per_device_train_batch_size=3,  # Smaller batch size to reduce memory load
     evaluation_strategy="no",
     learning_rate=2e-5,
     num_train_epochs=1,  # Just one epoch for the test
     save_total_limit=1,
     predict_with_generate=True,
     fp16=True,
+    dataloader_num_workers=4,  # Number of subprocesses to use for data loading
 )
 
 # Initialize trainer for the quick test
@@ -89,44 +94,24 @@ print(f"Time for one epoch on 100 samples: {elapsed_time:.2f} seconds")
 
 # Estimate for full dataset
 total_samples = len(common_voice["train"])
-num_epochs = 1
+num_epochs = 3
 estimated_time = (elapsed_time / 100) * total_samples * num_epochs
 print(f"Estimated total training time for full dataset: {estimated_time / 3600:.2f} hours")
 
-# def compute_metrics(pred):
-#     pred_ids = pred.predictions
-#     label_ids = pred.label_ids
+# Save the trained model, tokenizer, and feature extractor
+output_dir = "./trained_model"
 
-#     # Replace -100 in labels as we can't decode them
-#     label_ids[label_ids == -100] = tokenizer.pad_token_id
+# Create the directory if it does not exist
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
 
-#     pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-#     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+# Save the model
+model.save_pretrained(output_dir)
 
-#     wer_score = wer.compute(predictions=pred_str, references=label_str)
-#     return {"wer": wer_score}
+# Save the tokenizer
+tokenizer.save_pretrained(output_dir)
 
-# # Define training arguments
-# training_args = Seq2SeqTrainingArguments(
-#     output_dir="./results",
-#     per_device_train_batch_size=16,
-#     evaluation_strategy="epoch",
-#     learning_rate=2e-5,
-#     num_train_epochs=3,
-#     save_total_limit=2,
-#     predict_with_generate=True,
-#     fp16=True,
-# )
+# Save the feature extractor
+feature_extractor.save_pretrained(output_dir)
 
-# # Initialize trainer
-# trainer = Seq2SeqTrainer(
-#     model=model,
-#     args=training_args,
-#     train_dataset=common_voice["train"],
-#     data_collator=data_collator,
-#     tokenizer=tokenizer,
-#     compute_metrics=compute_metrics,
-# )
-
-# # Train model
-# trainer.train()
+print(f"Model, tokenizer, and feature extractor saved to {output_dir}")
