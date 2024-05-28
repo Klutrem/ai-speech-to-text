@@ -1,11 +1,11 @@
-import whisper
 import os
 import tempfile
-
 from fastapi import FastAPI, File, UploadFile
+import whisper
 
 app = FastAPI()
-model = whisper.load_model("small")
+model_path = "./trained_model/model.pt"
+model = whisper.load_model(model_path)
 
 def save_file_tmp(file: UploadFile) -> str:
     with tempfile.NamedTemporaryFile(prefix="uploaded_", suffix=extract_file_extension(file.filename), delete=False) as temp_file:
