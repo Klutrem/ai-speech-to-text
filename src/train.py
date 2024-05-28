@@ -1,90 +1,103 @@
 from datasets import DatasetDict, load_from_disk, Audio
-from transformers import WhisperFeatureExtractor, WhisperTokenizer, WhisperForConditionalGeneration, Seq2SeqTrainingArguments, Seq2SeqTrainer
+from transformers import WhisperProcessor, WhisperForConditionalGeneration, Seq2SeqTrainingArguments, Seq2SeqTrainer, WhisperFeatureExtractor, WhisperTokenizer
 import evaluate
+import torch
 from transformers import DataCollatorForSeq2Seq
 
-# Load feature extractor, tokenizer, and model
-feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-small")
-tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-small", language="Russian", task="transcribe")
-model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
+class CustomDataCollator(DataCollatorForSeq2Seq):
+    def __call__(self, features):
 
-# Load dataset
-common_voice = DatasetDict()
-common_voice["train"] = load_from_disk(dataset_path="/home/klutrem/Desktop/ai-speech-to-text/dataset")
+        input_features = [feature["input_features"] for feature in features]
+        labels = [feature["labels"] for feature in features]
 
-# Preprocess dataset
-common_voice = common_voice.remove_columns(["accent", "age", "client_id", "down_votes", "gender", "locale", "path", "segment", "up_votes"])
-common_voice = common_voice.cast_column("audio", Audio(sampling_rate=16000))
+        input_features_padded = torch.nn.utils.rnn.pad_sequence([torch.tensor(f) for f in input_features], batch_first=True)
 
-# Add a unique identifier for each audio file for better logging
-common_voice = common_voice["train"].map(lambda batch, idx: {"audio_id": idx}, with_indices=True)
+        labels_padded = torch.nn.utils.rnn.pad_sequence([torch.tensor(l) for l in labels], batch_first=True)
 
-def prepare_dataset(batch):
-    # Load and resample audio data from 48 to 16kHz
+        attention_mask = (input_features_padded != 0).float()
+
+        return {
+            "input_features": input_features_padded,
+            "labels": labels_padded,
+            "attention_mask": attention_mask
+        }
+
+def prepare_dataset(batch, feature_extractor, tokenizer):
+
     audio = batch["audio"]
-    audio_id = batch["audio_id"]
 
-    # Log audio ID for tracking
-    print(f"Processing audio ID: {audio_id}")
-
-    # Compute log-Mel input features from input audio array 
     audio_features = feature_extractor(audio["array"], sampling_rate=audio["sampling_rate"]).input_features[0]
 
-    # Log the number of audio features
-    print(f"Number of audio features: {audio_features.shape[0]}")
-
-    # Encode target text to label ids 
     sentence = batch["sentence"]
     sentence_ids = tokenizer(sentence).input_ids
 
-    # Log the original sentence and its corresponding token IDs
-    print(f"Original sentence: {sentence}")
-    print(f"Sentence token IDs: {sentence_ids}")
-
     return {"input_features": audio_features, "labels": sentence_ids}
 
-common_voice = common_voice.map(prepare_dataset, remove_columns=common_voice.column_names["train"], num_proc=4) 
+def main():
+    processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+    model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-small")
 
-# Define data collator
-data_collator = DataCollatorForSeq2Seq(tokenizer, model=model, padding=True)
+    common_voice = DatasetDict()
+    common_voice["train"] = load_from_disk(dataset_path="dataset").select(range(1500))
 
-# Load evaluation metric
-wer = evaluate.load("wer")
+    fraction = 0.1
+    eval_size = int(len(common_voice["train"]) * fraction)
+    train_dataset = common_voice["train"].select(range(eval_size, len(common_voice["train"])))
+    eval_dataset = common_voice["train"].select(range(eval_size))
 
-def compute_metrics(pred):
-    pred_ids = pred.predictions
-    label_ids = pred.label_ids
-    label_ids[label_ids == -100] = tokenizer.pad_token_id
-    pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
-    label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-    wer_score = wer.compute(predictions=pred_str, references=label_str)
-    return {"wer": wer_score}
+    train_dataset = train_dataset.cast_column("audio", Audio(sampling_rate=16000))
+    eval_dataset = eval_dataset.cast_column("audio", Audio(sampling_rate=16000))
 
-# Define training arguments
-training_args = Seq2SeqTrainingArguments(
-    output_dir="./results",
-    per_device_train_batch_size=8,  # Adjusted batch size
-    evaluation_strategy="epoch",
-    learning_rate=2e-5,
-    num_train_epochs=3,
-    save_total_limit=2,
-    predict_with_generate=True,
-    fp16=True,
-)
+    train_dataset = train_dataset.map(lambda batch: prepare_dataset(batch, processor.feature_extractor, processor.tokenizer), remove_columns=train_dataset.column_names, num_proc=1)
+    eval_dataset = eval_dataset.map(lambda batch: prepare_dataset(batch, processor.feature_extractor, processor.tokenizer), remove_columns=eval_dataset.column_names, num_proc=1)
 
-# Initialize trainer
-trainer = Seq2SeqTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=common_voice["train"],
-    data_collator=data_collator,
-    tokenizer=tokenizer,
-    compute_metrics=compute_metrics,
-)
+    data_collator = CustomDataCollator(tokenizer=processor.tokenizer, model=model, padding=True)
 
-# Train model
-trainer.train()
+    wer = evaluate.load("wer")
 
-# Save the model
-model.save_pretrained("./trained_model")
-tokenizer.save_pretrained("./trained_model")
+    def compute_metrics(pred):
+        pred_ids = pred.predictions
+        label_ids = pred.label_ids
+        label_ids[label_ids == -100] = processor.tokenizer.pad_token_id
+        pred_str = processor.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+        label_str = processor.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+        wer_score = wer.compute(predictions=pred_str, references=label_str)
+        return {"wer": wer_score}
+
+
+    training_args = Seq2SeqTrainingArguments(
+        output_dir="./results",
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=4,
+        evaluation_strategy="epoch",
+        learning_rate=2e-5,
+        num_train_epochs=3,
+        save_total_limit=2,
+        predict_with_generate=True,
+        fp16=True,
+        dataloader_num_workers=3,
+    )
+
+
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=data_collator,
+        tokenizer=processor.tokenizer,
+        compute_metrics=compute_metrics,
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+
+    trainer.train()
+
+
+    model.save_pretrained("./trained_model2")
+    processor.save_pretrained("./trained_model2")
+
+if __name__ == "__main__":
+    main()
