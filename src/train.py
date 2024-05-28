@@ -1,4 +1,3 @@
-import os
 from datasets import DatasetDict, load_from_disk, Audio
 from transformers import WhisperProcessor, WhisperForConditionalGeneration, Seq2SeqTrainingArguments, Seq2SeqTrainer, WhisperFeatureExtractor, WhisperTokenizer
 import evaluate
